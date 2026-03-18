@@ -2,6 +2,7 @@ package com.ratana.monoloticappbackend.service.impl;
 
 import com.ratana.monoloticappbackend.service.TokenEncryptionService;
 import org.springframework.beans.factory.annotation.Value;
+import org.springframework.stereotype.Service;
 
 import javax.crypto.Cipher;
 import javax.crypto.SecretKey;
@@ -11,9 +12,10 @@ import java.nio.charset.StandardCharsets;
 import java.security.SecureRandom;
 import java.util.Base64;
 
+@Service
 public class TokenEncryptionServiceImpl implements TokenEncryptionService {
 
-    @Value("${token.encryption.key}") // 32-byte Base64 key
+    @Value("${token.encryption.key}")
     private String base64Key;
 
     @Override
@@ -27,13 +29,14 @@ public class TokenEncryptionServiceImpl implements TokenEncryptionService {
         cipher.init(Cipher.ENCRYPT_MODE, key, new GCMParameterSpec(128, iv));
 
         byte[] ciphertext = cipher.doFinal(plaintext.getBytes(StandardCharsets.UTF_8));
+        // Format: base64(iv):base64(ciphertext)
         return Base64.getEncoder().encodeToString(iv) + ":" +
                 Base64.getEncoder().encodeToString(ciphertext);
     }
 
     @Override
     public String decrypt(String encryptedData) throws Exception {
-        String[] parts = encryptedData.split(":");
+        String[] parts = encryptedData.split(":", 2);
         byte[] iv = Base64.getDecoder().decode(parts[0]);
         byte[] ciphertext = Base64.getDecoder().decode(parts[1]);
 

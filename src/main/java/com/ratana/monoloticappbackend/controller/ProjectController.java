@@ -1,50 +1,87 @@
 package com.ratana.monoloticappbackend.controller;
 
-
-import jakarta.servlet.http.HttpServletRequest;
+import com.ratana.monoloticappbackend.dto.ProjectRequest;
+import com.ratana.monoloticappbackend.model.Project;
+import com.ratana.monoloticappbackend.repository.ProjectRepository;
+import com.ratana.monoloticappbackend.service.ArgoCdService;
+import com.ratana.monoloticappbackend.service.GitOpsService;
+import com.ratana.monoloticappbackend.service.JenkinsService;
+import jakarta.validation.Valid;
 import lombok.RequiredArgsConstructor;
+import lombok.extern.slf4j.Slf4j;
+import org.springframework.beans.factory.annotation.Value;
 import org.springframework.http.ResponseEntity;
-import org.springframework.web.bind.annotation.PostMapping;
-import org.springframework.web.bind.annotation.RequestBody;
-import org.springframework.web.bind.annotation.RequestMapping;
-import org.springframework.web.bind.annotation.RestController;
+import org.springframework.security.core.Authentication;
+import org.springframework.security.oauth2.server.resource.authentication.JwtAuthenticationToken;
+import org.springframework.web.bind.annotation.*;
 
 import java.util.Map;
 
+@Slf4j
 @RestController
 @RequiredArgsConstructor
 @RequestMapping("/api/v1/projects")
 public class ProjectController {
 
-    @PostMapping("/api/projects")
-    public ResponseEntity<?> createProject(@RequestBody ProjectRequest req,
-                                           HttpServletRequest httpReq) {
-        String userId = extractUserFromRequest(httpReq);
-        String appName = req.getAppName();
+    private final GitOpsService gitOpsService;
+    private final ArgoCdService argoCdService;
+    private final JenkinsService jenkinsService;
+    private final ProjectRepository projectRepo;
 
-        // 1. Write GitOps manifests (service + ingress; Jenkins writes deployment)
-        gitOpsService.createManifests(appName);
+    @Value("${platform.domain}")
+    private String platformDomain;
 
-        // 2. Create ArgoCD Application (idempotent — skip if already exists)
-        argoCdService.createApplicationIfAbsent(appName);
+    @PostMapping
+    public ResponseEntity<?> createProject(@Valid @RequestBody ProjectRequest req, Authentication auth) {
+        String userId = extractUserFromRequest(auth);
+        String appName = req.appName();
 
-        // 3. Trigger Jenkins CI
-        jenkinsService.triggerBuild(req.getRepoUrl(), req.getBranch(), appName);
+        if (projectRepo.existsByAppName(appName)) {
+            return ResponseEntity.badRequest().body(Map.of("error", "App name already in use"));
+        }
 
-        // 4. Persist project record
-        Project project = new Project();
-        project.setUserId(userId);
-        project.setAppName(appName);
-        project.setRepoUrl(req.getRepoUrl());
-        project.setStatus("BUILDING");
-        project.setUrl("https://" + appName + ".yourplatform.com");
-        projectRepo.save(project);
+        int port = req.appPort() != null ? req.appPort() : 3000;
 
-        return ResponseEntity.ok(Map.of(
-                "appName", appName,
-                "url", project.getUrl(),
-                "status", "BUILDING"
-        ));
+        try {
+            // 1. Write GitOps manifests (service + ingress)
+            gitOpsService.createManifests(appName, req.repoUrl(), port);
+
+            // 2. Create ArgoCD Application (idempotent)
+            argoCdService.createApplicationIfAbsent(appName);
+
+            // 3. Trigger Jenkins CI build
+            jenkinsService.triggerBuild(req.repoUrl(), req.branch(), appName, req.appPort());
+
+            // 4. Persist project record
+            Project project = new Project();
+            project.setUserId(userId);
+            project.setAppName(appName);
+            project.setRepoUrl(req.repoUrl());
+            project.setBranch(req.branch());
+            project.setAppPort(port);
+            project.setStatus("BUILDING");
+            project.setUrl("https://" + appName + "." + platformDomain);
+            projectRepo.save(project);
+
+            log.info("Project {} created and deployment pipeline triggered", appName);
+
+            return ResponseEntity.ok(project);
+        } catch (Exception e) {
+            log.error("Failed to create project deployment flow for app: " + appName, e);
+            return ResponseEntity.internalServerError().body(Map.of("error", "Deployment failed to start"));
+        }
     }
 
+    @GetMapping
+    public ResponseEntity<?> listProjects(Authentication auth) {
+        String userId = extractUserFromRequest(auth);
+        return ResponseEntity.ok(projectRepo.findByUserId(userId));
+    }
+
+    private String extractUserFromRequest(Authentication auth) {
+        if (auth instanceof JwtAuthenticationToken jwtAuth) {
+            return jwtAuth.getToken().getSubject();
+        }
+        return auth != null ? auth.getName() : "anonymous";
+    }
 }

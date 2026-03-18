@@ -1,9 +1,64 @@
 spring:
   application:
     name: monolotic-app-backend
+
   datasource:
-    url: jdbc:postgresql://localhost:5432/monolotic-app-db
-    username: postgres
-    password: 1234
+    url: ${SPRING_DATASOURCE_URL:jdbc:postgresql://localhost:5432/platform_db}
+    username: ${SPRING_DATASOURCE_USERNAME:postgres}
+    password: ${SPRING_DATASOURCE_PASSWORD:postgres}
     driver-class-name: org.postgresql.Driver
 
+  jpa:
+    hibernate:
+      ddl-auto: update
+    show-sql: false
+    properties:
+      hibernate:
+        dialect: org.hibernate.dialect.PostgreSQLDialect
+        format_sql: true
+
+  security:
+    oauth2:
+      resourceserver:
+        jwt:
+          # For MVP we use symmetric HMAC-SHA256 – override with RSA in prod
+          secret: ${JWT_SECRET_KEY:changeme-at-least-32-chars-long!!}
+
+server:
+  port: 8080
+
+# ── Platform-specific config ───────────────────────────────────────────
+token:
+  encryption:
+    # 32-byte Base64-encoded AES-256 key  (generate: openssl rand -base64 32)
+    key: ${ENCRYPTION_SECRET_KEY:dGhpcyBpcyBhIDMyLWJ5dGUga2V5ISEhISEhIQ==}
+
+jenkins:
+  url: ${JENKINS_URL:http://localhost:8080}
+  user: ${JENKINS_USER:admin}
+  token: ${JENKINS_API_TOKEN:changeme}
+  job-name: deploy-pipeline
+
+argocd:
+  url: ${ARGOCD_URL:http://localhost:8090}
+  token: ${ARGOCD_TOKEN:changeme}
+  namespace: argocd
+
+gitops:
+  repo-url: ${GITOPS_REPO_URL:https://github.com/your-org/platform-gitops.git}
+  branch: ${GITOPS_BRANCH:main}
+  token: ${GITOPS_REPO_TOKEN:changeme}   # GitHub PAT with repo write access
+
+platform:
+  domain: ${PLATFORM_DOMAIN:yourplatform.com}
+  registry: ${REGISTRY_URL:registry.yourplatform.com}
+
+# ── CORS ──────────────────────────────────────────────────────────────
+cors:
+  allowed-origins: ${CORS_ORIGINS:http://localhost:3000}
+
+# ── Logging ───────────────────────────────────────────────────────────
+logging:
+  level:
+    com.ratana: DEBUG
+    org.springframework.security: INFO
