@@ -3,8 +3,6 @@ package com.ratana.monoloticappbackend.controller;
 import com.ratana.monoloticappbackend.dto.ProjectRequest;
 import com.ratana.monoloticappbackend.model.Project;
 import com.ratana.monoloticappbackend.repository.ProjectRepository;
-import com.ratana.monoloticappbackend.service.ArgoCdService;
-import com.ratana.monoloticappbackend.service.GitOpsService;
 import com.ratana.monoloticappbackend.service.JenkinsService;
 import jakarta.validation.Valid;
 import lombok.RequiredArgsConstructor;
@@ -23,8 +21,6 @@ import java.util.Map;
 @RequestMapping("/api/v1/projects")
 public class ProjectController {
 
-    private final GitOpsService gitOpsService;
-    private final ArgoCdService argoCdService;
     private final JenkinsService jenkinsService;
     private final ProjectRepository projectRepo;
 
@@ -43,16 +39,10 @@ public class ProjectController {
         int port = req.appPort() != null ? req.appPort() : 3000;
 
         try {
-            // 1. Write GitOps manifests (service + ingress)
-            gitOpsService.createManifests(appName, req.repoUrl(), port);
+            // 1. Trigger Jenkins CI build (this job writes deployment/service/ingress to GitOps)
+            jenkinsService.triggerBuild(req.repoUrl(), req.branch(), appName, port, userId);
 
-            // 2. Create ArgoCD Application (idempotent)
-            argoCdService.createApplicationIfAbsent(appName);
-
-            // 3. Trigger Jenkins CI build
-            jenkinsService.triggerBuild(req.repoUrl(), req.branch(), appName, req.appPort());
-
-            // 4. Persist project record
+            // 2. Persist project record
             Project project = new Project();
             project.setUserId(userId);
             project.setAppName(appName);
