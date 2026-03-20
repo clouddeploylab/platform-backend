@@ -1,8 +1,10 @@
 package com.ratana.monoloticappbackend.controller;
 
+import com.ratana.monoloticappbackend.dto.DeployProjectResponse;
 import com.ratana.monoloticappbackend.dto.ProjectRequest;
 import com.ratana.monoloticappbackend.model.Project;
 import com.ratana.monoloticappbackend.repository.ProjectRepository;
+import com.ratana.monoloticappbackend.dto.JenkinsBuildTriggerResult;
 import com.ratana.monoloticappbackend.service.JenkinsService;
 import jakarta.validation.Valid;
 import lombok.RequiredArgsConstructor;
@@ -40,7 +42,7 @@ public class ProjectController {
 
         try {
             // 1. Trigger Jenkins CI build (this job writes deployment/service/ingress to GitOps)
-            jenkinsService.triggerBuild(req.repoUrl(), req.branch(), appName, port, userId);
+            JenkinsBuildTriggerResult trigger = jenkinsService.triggerBuild(req.repoUrl(), req.branch(), appName, port, userId);
 
             // 2. Persist project record
             Project project = new Project();
@@ -55,7 +57,12 @@ public class ProjectController {
 
             log.info("Project {} created and deployment pipeline triggered", appName);
 
-            return ResponseEntity.ok(project);
+            return ResponseEntity.ok(new DeployProjectResponse(
+                    project,
+                    trigger.jobName(),
+                    trigger.queueUrl(),
+                    trigger.queueItemId()
+            ));
         } catch (Exception e) {
             log.error("Failed to create project deployment flow for app: " + appName, e);
             return ResponseEntity.internalServerError().body(Map.of("error", "Deployment failed to start"));

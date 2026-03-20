@@ -40,6 +40,8 @@ public class SecurityConfig {
                 .requestMatchers("/v3/api-docs/**", "/swagger-ui/**", "/swagger-ui.html").permitAll()
                 // Token exchange endpoint (GitHub OAuth token -> backend JWT)
                 .requestMatchers(HttpMethod.POST, "/api/v1/auth/github").permitAll()
+                // WebSocket handshake endpoint (JWT is validated via handshake interceptor)
+                .requestMatchers("/ws/**").permitAll()
                 // Our API
                 .requestMatchers(HttpMethod.OPTIONS, "/**").permitAll()
                 .anyRequest().authenticated()
