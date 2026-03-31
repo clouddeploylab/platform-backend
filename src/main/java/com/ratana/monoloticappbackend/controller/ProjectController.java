@@ -213,8 +213,14 @@ public class ProjectController {
         boolean shouldAutoDeploy = req.autoDeployEnabled() == null || req.autoDeployEnabled();
         boolean createOnProvider = req.createOnProvider() == null || req.createOnProvider();
         boolean webhookAutoCreated = false;
+        String configuredBranch = normalizeBranchValue(req.branch(), project.getBranch());
+
+        if (configuredBranch.isBlank()) {
+            return ResponseEntity.badRequest().body(Map.of("error", "Webhook branch is required"));
+        }
 
         project.setWebhookName(req.name().trim());
+        project.setBranch(configuredBranch);
         project.setWebhookSecret(encryptedSecret);
         project.setAutoDeployEnabled(shouldAutoDeploy);
 
@@ -422,5 +428,20 @@ public class ProjectController {
             return jwtAuth.getToken().getSubject();
         }
         return auth != null ? auth.getName() : "anonymous";
+    }
+
+    private String normalizeBranchValue(String candidate, String fallback) {
+        String value = candidate;
+        if (value == null || value.isBlank()) {
+            value = fallback;
+        }
+        if (value == null) {
+            return "";
+        }
+        String normalized = value.trim();
+        if (normalized.startsWith("refs/heads/")) {
+            normalized = normalized.substring("refs/heads/".length());
+        }
+        return normalized.trim();
     }
 }

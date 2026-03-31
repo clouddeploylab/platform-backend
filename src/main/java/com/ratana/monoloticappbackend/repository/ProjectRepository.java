@@ -16,5 +16,6 @@ public interface ProjectRepository extends JpaRepository<Project, String> {
     Optional<Project> findByUserIdAndId(String userId, String id);
     Optional<Project> findByRepoProviderAndRepoFullName(String repoProvider, String repoFullName);
     Optional<Project> findByRepoProviderIgnoreCaseAndRepoFullNameIgnoreCase(String repoProvider, String repoFullName);
+    List<Project> findAllByRepoProviderIgnoreCaseAndRepoFullNameIgnoreCase(String repoProvider, String repoFullName);
 
 }

@@ -10,4 +10,9 @@ public interface GitHubService {
      * and calling the GitHub REST API. Never leaks the token to clients.
      */
     List<RepoDto> getReposForUser(String userId);
+
+    /**
+     * Fetch branch names for a repository (owner/repo) visible to the user.
+     */
+    List<String> getBranchesForRepo(String userId, String repoFullName);
 }

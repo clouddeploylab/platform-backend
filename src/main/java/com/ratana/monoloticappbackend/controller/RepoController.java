@@ -8,6 +8,7 @@ import org.springframework.security.core.Authentication;
 import org.springframework.security.oauth2.server.resource.authentication.JwtAuthenticationToken;
 import org.springframework.web.bind.annotation.GetMapping;
 import org.springframework.web.bind.annotation.RequestMapping;
+import org.springframework.web.bind.annotation.RequestParam;
 import org.springframework.web.bind.annotation.RestController;
 
 import java.util.List;
@@ -30,6 +31,26 @@ public class RepoController {
         try {
             List<RepoDto> repos = gitHubService.getReposForUser(userId);
             return ResponseEntity.ok(repos);
+        } catch (Exception e) {
+            return ResponseEntity.internalServerError().body(Map.of("error", e.getMessage()));
+        }
+    }
+
+    @GetMapping("/branches")
+    public ResponseEntity<?> getBranches(
+            @RequestParam("repoFullName") String repoFullName,
+            Authentication auth
+    ) {
+        String userId = extractUserFromRequest(auth);
+        if (userId == null) {
+            return ResponseEntity.status(401).body(Map.of("error", "Unauthorized"));
+        }
+        if (repoFullName == null || repoFullName.isBlank()) {
+            return ResponseEntity.badRequest().body(Map.of("error", "repoFullName is required"));
+        }
+
+        try {
+            return ResponseEntity.ok(gitHubService.getBranchesForRepo(userId, repoFullName.trim()));
         } catch (Exception e) {
             return ResponseEntity.internalServerError().body(Map.of("error", e.getMessage()));
         }

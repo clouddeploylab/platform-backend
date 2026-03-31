@@ -19,8 +19,8 @@ import org.springframework.web.bind.annotation.RestController;
 
 import java.net.URLDecoder;
 import java.nio.charset.StandardCharsets;
+import java.util.List;
 import java.util.Map;
-import java.util.Optional;
 
 @Slf4j
 @RestController
@@ -62,8 +62,8 @@ public class WebhookController {
                 return ResponseEntity.badRequest().body(Map.of("error", "Missing repository.full_name"));
             }
 
-            Optional<Project> projectOpt = projectRepo.findByRepoProviderIgnoreCaseAndRepoFullNameIgnoreCase("github", repoFullName);
-            if (projectOpt.isEmpty()) {
+            List<Project> allProjects = projectRepo.findAllByRepoProviderIgnoreCaseAndRepoFullNameIgnoreCase("github", repoFullName);
+            if (allProjects.isEmpty()) {
                 log.info("GitHub webhook ignored deliveryId={} reason=project-not-found repo={} branch={} ref={}",
                         deliveryId, repoFullName, branch, ref);
                 return ResponseEntity.ok(Map.of(
@@ -74,44 +74,63 @@ public class WebhookController {
                 ));
             }
 
-            Project project = projectOpt.get();
-            String configuredBranch = project.getBranch() == null ? "" : project.getBranch().trim();
-
-            if (!Boolean.TRUE.equals(project.getAutoDeployEnabled())) {
-                log.info("GitHub webhook ignored deliveryId={} projectId={} reason=auto-deploy-disabled repo={} branch={}",
-                        deliveryId, project.getId(), repoFullName, branch);
-                return ResponseEntity.ok(Map.of(
-                        "status", "ignored",
-                        "reason", "auto-deploy-disabled",
-                        "projectId", project.getId()
-                ));
-            }
-
-            if (configuredBranch.isBlank()) {
-                return ResponseEntity.status(HttpStatus.CONFLICT).body(Map.of("error", "Project branch not configured"));
-            }
-
-            if (!configuredBranch.equals(branch)) {
-                log.info("GitHub webhook ignored deliveryId={} projectId={} reason=branch-mismatch expected={} got={} repo={}",
-                        deliveryId, project.getId(), configuredBranch, branch, repoFullName);
+            List<Project> branchProjects = allProjects.stream()
+                    .filter(project -> {
+                        String configured = project.getBranch() == null ? "" : project.getBranch().trim();
+                        return configured.equals(branch);
+                    })
+                    .toList();
+            if (branchProjects.isEmpty()) {
+                log.info("GitHub webhook ignored deliveryId={} projectId={} reason=branch-mismatch repo={} branch={}",
+                        deliveryId, "N/A", repoFullName, branch);
                 return ResponseEntity.ok(Map.of(
                         "status", "ignored",
                         "reason", "branch-mismatch",
-                        "projectId", project.getId(),
-                        "expectedBranch", configuredBranch,
+                        "repoFullName", repoFullName,
                         "receivedBranch", branch
                 ));
             }
 
-            if (project.getWebhookSecret() == null || project.getWebhookSecret().isBlank()) {
+            List<Project> autoDeployProjects = branchProjects.stream()
+                    .filter(project -> Boolean.TRUE.equals(project.getAutoDeployEnabled()))
+                    .toList();
+            if (autoDeployProjects.isEmpty()) {
+                String projectId = branchProjects.get(0).getId();
+                log.info("GitHub webhook ignored deliveryId={} projectId={} reason=auto-deploy-disabled repo={} branch={}",
+                        deliveryId, projectId, repoFullName, branch);
+                return ResponseEntity.ok(Map.of(
+                        "status", "ignored",
+                        "reason", "auto-deploy-disabled",
+                        "projectId", projectId
+                ));
+            }
+
+            Project project = null;
+            boolean hasMissingSecret = false;
+            for (Project candidate : autoDeployProjects) {
+                if (candidate.getWebhookSecret() == null || candidate.getWebhookSecret().isBlank()) {
+                    hasMissingSecret = true;
+                    continue;
+                }
+                try {
+                    String decryptedSecret = webhookService.decryptSecret(candidate.getWebhookSecret());
+                    boolean valid = webhookService.verifyGithubSignature(decryptedSecret, rawPayload, signatureHeader);
+                    if (valid) {
+                        project = candidate;
+                        break;
+                    }
+                } catch (Exception ex) {
+                    log.warn("Failed to validate webhook signature for candidate projectId={}", candidate.getId(), ex);
+                }
+            }
+
+            if (project == null && hasMissingSecret) {
                 return ResponseEntity.status(HttpStatus.CONFLICT).body(Map.of("error", "Webhook secret not configured"));
             }
 
-            String decryptedSecret = webhookService.decryptSecret(project.getWebhookSecret());
-            boolean valid = webhookService.verifyGithubSignature(decryptedSecret, rawPayload, signatureHeader);
-            if (!valid) {
+            if (project == null) {
                 log.warn("GitHub webhook rejected deliveryId={} projectId={} reason=invalid-signature repo={} branch={}",
-                        deliveryId, project.getId(), repoFullName, branch);
+                        deliveryId, "N/A", repoFullName, branch);
                 return ResponseEntity.status(HttpStatus.UNAUTHORIZED).body(Map.of("error", "Invalid signature"));
             }
 
@@ -120,13 +139,13 @@ public class WebhookController {
             try {
                 trigger = jenkinsService.triggerBuild(
                         project.getRepoUrl(),
-                        configuredBranch,
+                        branch,
                         project.getAppName(),
                         appPort,
                         project.getUserId()
                 );
             } catch (Exception ex) {
-                log.error("Jenkins trigger failed for projectId={} repo={} branch={}", project.getId(), repoFullName, configuredBranch, ex);
+                log.error("Jenkins trigger failed for projectId={} repo={} branch={}", project.getId(), repoFullName, branch, ex);
                 return ResponseEntity.status(HttpStatus.BAD_GATEWAY).body(Map.of(
                         "error", "Jenkins trigger failed",
                         "projectId", project.getId()
@@ -136,7 +155,7 @@ public class WebhookController {
             project.setStatus("BUILDING");
             projectRepo.save(project);
             log.info("GitHub webhook accepted deliveryId={} projectId={} repo={} branch={} queueItemId={}",
-                    deliveryId, project.getId(), repoFullName, configuredBranch, trigger.queueItemId());
+                    deliveryId, project.getId(), repoFullName, branch, trigger.queueItemId());
 
             return ResponseEntity.accepted().body(Map.of(
                     "status", "accepted",
