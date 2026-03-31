@@ -1,8 +1,10 @@
 package com.ratana.monoloticappbackend.controller;
 
 import com.ratana.monoloticappbackend.model.GitHubToken;
+import com.ratana.monoloticappbackend.model.Workspace;
 import com.ratana.monoloticappbackend.repository.GitHubTokenRepository;
 import com.ratana.monoloticappbackend.service.TokenEncryptionService;
+import com.ratana.monoloticappbackend.service.WorkspaceService;
 import io.jsonwebtoken.Jwts;
 import io.jsonwebtoken.security.Keys;
 import lombok.RequiredArgsConstructor;
@@ -34,6 +36,7 @@ public class AuthController {
 
     private final TokenEncryptionService encryptionService;
     private final GitHubTokenRepository tokenRepo;
+    private final WorkspaceService workspaceService;
 
     @Value("${spring.security.oauth2.resourceserver.jwt.secret}")
     private String jwtSecret;
@@ -52,9 +55,11 @@ public class AuthController {
             return ResponseEntity.badRequest().body(Map.of("error", "Token is required"));
         }
 
+        final Map<String, Object> githubUser;
         final String userId;
         try {
-            userId = resolveGitHubUserId(req.token());
+            githubUser = resolveGitHubUser(req.token());
+            userId = githubUser == null || githubUser.get("id") == null ? null : String.valueOf(githubUser.get("id"));
         } catch (Exception e) {
             log.error("Failed to verify GitHub access token", e);
             return ResponseEntity.status(502).body(Map.of("error", "Failed to verify token with GitHub"));
@@ -82,10 +87,19 @@ public class AuthController {
             tokenRepo.save(tokenEntity);
             log.info("Successfully securely stored GitHub token for user {}", userId);
 
+            String login = githubUser == null ? null : asString(githubUser.get("login"));
+            String workspaceName = login != null && !login.isBlank() ? login + "'s Workspace" : "My Workspace";
+            Workspace workspace = workspaceService.ensurePersonalWorkspace(userId, workspaceName);
+
             String backendToken = createBackendToken(userId);
             return ResponseEntity.ok(Map.of(
                     "status", "Token stored securely",
-                    "backendToken", backendToken
+                    "backendToken", backendToken,
+                    "workspace", Map.of(
+                            "id", workspace.getId(),
+                            "name", workspace.getName(),
+                            "slug", workspace.getSlug()
+                    )
             ));
         } catch (Exception e) {
             log.error("Failed to encrypt/store token", e);
@@ -93,7 +107,7 @@ public class AuthController {
         }
     }
 
-    private String resolveGitHubUserId(String githubToken) {
+    private Map<String, Object> resolveGitHubUser(String githubToken) {
         try {
             Map<String, Object> user = githubClient.get()
                     .uri("/user")
@@ -101,15 +115,15 @@ public class AuthController {
                     .retrieve()
                     .bodyToMono(new ParameterizedTypeReference<Map<String, Object>>() {})
                     .block();
-
-            if (user == null || user.get("id") == null) {
-                return null;
-            }
-
-            return String.valueOf(user.get("id"));
+            if (user == null || user.get("id") == null) return null;
+            return user;
         } catch (WebClientResponseException.Unauthorized ex) {
             return null;
         }
+    }
+
+    private String asString(Object value) {
+        return value == null ? null : String.valueOf(value);
     }
 
     private String createBackendToken(String userId) {

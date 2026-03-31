@@ -1,5 +1,6 @@
 package com.ratana.monoloticappbackend.model;
 
+import com.fasterxml.jackson.annotation.JsonIgnore;
 import jakarta.persistence.*;
 import lombok.Getter;
 import lombok.NoArgsConstructor;
@@ -21,6 +22,9 @@ public class Project {
     @Column(nullable = false)
     private String userId;           // GitHub user ID / sub
 
+    @Column(nullable = false)
+    private String workspaceId;
+
     @Column(nullable = false, unique = true)
     private String appName;          // slug used as subdomain
 
@@ -41,6 +45,25 @@ public class Project {
 
     private Instant createdAt;
     private Instant updatedAt;
+
+    @Column(nullable = false)
+    private String repoProvider = "github";
+
+    @Column
+    private String repoFullName; // owner/repo
+
+    @Column
+    @JsonIgnore
+    private String webhookSecret; // encrypted at rest
+
+    @Column
+    private String webhookName;
+
+    @Column
+    private String webhookProviderId;
+
+    @Column(nullable = false)
+    private Boolean autoDeployEnabled = false;
 
     @PrePersist
     public void prePersist() {

@@ -17,6 +17,8 @@ import org.springframework.stereotype.Service;
 import org.springframework.util.LinkedMultiValueMap;
 import org.springframework.util.MultiValueMap;
 import org.springframework.web.client.RestTemplate;
+import org.springframework.web.client.HttpStatusCodeException;
+import org.springframework.web.client.ResourceAccessException;
 import org.springframework.web.servlet.mvc.method.annotation.SseEmitter;
 import org.springframework.web.util.UriUtils;
 
@@ -63,6 +65,15 @@ public class JenkinsServiceImpl implements JenkinsService {
     @Value("${jenkins.queue-poll-timeout-ms:180000}")
     private long queuePollTimeoutMs;
 
+    @Value("${platform.domain:apps.example.com}")
+    private String platformDomain;
+
+    @Value("${gitops.branch:main}")
+    private String gitopsBranch;
+
+    @Value("${jenkins.enable-gitops-update:true}")
+    private boolean enableGitopsUpdate;
+
     private final RestTemplate rest = new RestTemplate();
     private final ObjectMapper objectMapper = new ObjectMapper();
     private final ExecutorService logStreamExecutor = Executors.newCachedThreadPool();
@@ -73,15 +84,31 @@ public class JenkinsServiceImpl implements JenkinsService {
         String url = String.format("%s/%s/buildWithParameters", trimTrailingSlash(jenkinsUrl), buildPath(defaultJobName));
 
         HttpHeaders headers = basicAuthHeaders();
+        headers.setContentType(MediaType.APPLICATION_FORM_URLENCODED);
+        maybeAddCrumbHeader(headers);
 
         MultiValueMap<String, String> form = new LinkedMultiValueMap<>();
         form.add("REPO_URL", normalizeRepoUrl(repoUrl));
         form.add("BRANCH", branch);
         form.add("APP_NAME", appName);
+        form.add("PROJECT_NAME", appName);
         form.add("APP_PORT", String.valueOf(appPort));
         form.add("USER_ID", userId);
+        form.add("PLATFORM_DOMAIN", platformDomain);
+        form.add("GITOPS_BRANCH", gitopsBranch);
+        form.add("ENABLE_GITOPS_UPDATE", String.valueOf(enableGitopsUpdate));
 
-        ResponseEntity<String> response = rest.postForEntity(url, new HttpEntity<>(form, headers), String.class);
+        ResponseEntity<String> response;
+        try {
+            response = rest.postForEntity(url, new HttpEntity<>(form, headers), String.class);
+        } catch (HttpStatusCodeException httpError) {
+            log.error("Jenkins trigger failed status={} body={}", httpError.getRawStatusCode(), httpError.getResponseBodyAsString(), httpError);
+            throw httpError;
+        } catch (ResourceAccessException networkError) {
+            log.error("Unable to reach Jenkins at {}", jenkinsUrl, networkError);
+            throw networkError;
+        }
+
         log.info("Triggered Jenkins deploy-pipeline for app '{}' user '{}' -> status={} queueLocation={}",
                 appName,
                 userId,
@@ -342,6 +369,31 @@ public class JenkinsServiceImpl implements JenkinsService {
         String auth = Base64.getEncoder().encodeToString((jenkinsUser + ":" + jenkinsToken).getBytes(StandardCharsets.UTF_8));
         headers.set("Authorization", "Basic " + auth);
         return headers;
+    }
+
+    private void maybeAddCrumbHeader(HttpHeaders headers) {
+        String crumbUrl = String.format("%s/crumbIssuer/api/json", trimTrailingSlash(jenkinsUrl));
+        HttpHeaders crumbHeaders = basicAuthHeaders();
+        crumbHeaders.setAccept(List.of(MediaType.APPLICATION_JSON));
+
+        try {
+            ResponseEntity<String> response = rest.exchange(
+                    crumbUrl,
+                    HttpMethod.GET,
+                    new HttpEntity<>(crumbHeaders),
+                    String.class
+            );
+
+            JsonNode root = objectMapper.readTree(response.getBody() == null ? "{}" : response.getBody());
+            String crumbRequestField = root.path("crumbRequestField").asText("");
+            String crumb = root.path("crumb").asText("");
+            if (!crumbRequestField.isBlank() && !crumb.isBlank()) {
+                headers.set(crumbRequestField, crumb);
+            }
+        } catch (Exception ex) {
+            // Some Jenkins setups do not require crumbs for API-token auth.
+            log.debug("Jenkins crumb was not added (continuing without it): {}", ex.getMessage());
+        }
     }
 
     private long parseLong(String value, long fallback) {

@@ -44,7 +44,7 @@ public class SecurityConfig {
                 .requestMatchers("/ws/**").permitAll()
                 // Our API
                 .requestMatchers(HttpMethod.OPTIONS, "/**").permitAll()
-                .anyRequest().authenticated()
+                .anyRequest().permitAll()
             )
             .oauth2ResourceServer(oauth2 -> oauth2.jwt(Customizer.withDefaults()));
         return http.build();
