@@ -25,6 +25,9 @@ public class Project {
     @Column(nullable = false)
     private String workspaceId;
 
+    @Column
+    private String workspaceSlug;
+
     @Column(nullable = false, unique = true)
     private String appName;          // slug used as subdomain
 
@@ -40,6 +43,9 @@ public class Project {
     private String status;           // BUILDING | DEPLOYED | FAILED
 
     private String url;              // https://<appName>.yourplatform.com
+
+    @Column
+    private String customDomain;     // optional user-managed domain
 
     private Integer appPort;         // container port
 

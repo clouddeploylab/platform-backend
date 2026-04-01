@@ -6,7 +6,15 @@ import org.springframework.web.servlet.mvc.method.annotation.SseEmitter;
 import java.util.concurrent.atomic.AtomicBoolean;
 
 public interface JenkinsService {
-    JenkinsBuildTriggerResult triggerBuild(String repoUrl, String branch, String appName, int appPort, String userId);
+    JenkinsBuildTriggerResult triggerBuild(
+            String repoUrl,
+            String branch,
+            String appName,
+            int appPort,
+            String userId,
+            String workspaceId,
+            String customDomain
+    );
 
     SseEmitter streamBuildLogs(String jobName, int buildNumber);
 

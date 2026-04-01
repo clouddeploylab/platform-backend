@@ -142,7 +142,11 @@ public class WebhookController {
                         branch,
                         project.getAppName(),
                         appPort,
-                        project.getUserId()
+                        project.getUserId(),
+                        project.getWorkspaceSlug() != null && !project.getWorkspaceSlug().isBlank()
+                                ? project.getWorkspaceSlug()
+                                : project.getWorkspaceId(),
+                        project.getCustomDomain()
                 );
             } catch (Exception ex) {
                 log.error("Jenkins trigger failed for projectId={} repo={} branch={}", project.getId(), repoFullName, branch, ex);

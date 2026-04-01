@@ -80,7 +80,15 @@ public class JenkinsServiceImpl implements JenkinsService {
     private static final Pattern QUEUE_ITEM_PATTERN = Pattern.compile("/queue/item/(\\d+)/?");
 
     @Override
-    public JenkinsBuildTriggerResult triggerBuild(String repoUrl, String branch, String appName, int appPort, String userId) {
+    public JenkinsBuildTriggerResult triggerBuild(
+            String repoUrl,
+            String branch,
+            String appName,
+            int appPort,
+            String userId,
+            String workspaceId,
+            String customDomain
+    ) {
         String url = String.format("%s/%s/buildWithParameters", trimTrailingSlash(jenkinsUrl), buildPath(defaultJobName));
 
         HttpHeaders headers = basicAuthHeaders();
@@ -88,15 +96,18 @@ public class JenkinsServiceImpl implements JenkinsService {
         maybeAddCrumbHeader(headers);
 
         MultiValueMap<String, String> form = new LinkedMultiValueMap<>();
+        String enableGitopsValue = String.valueOf(enableGitopsUpdate);
         form.add("REPO_URL", normalizeRepoUrl(repoUrl));
         form.add("BRANCH", branch);
         form.add("APP_NAME", appName);
         form.add("PROJECT_NAME", appName);
         form.add("APP_PORT", String.valueOf(appPort));
         form.add("USER_ID", userId);
+        form.add("WORKSPACE_ID", workspaceId == null ? "" : workspaceId.trim());
+        form.add("CUSTOM_DOMAIN", normalizeCustomDomain(customDomain));
         form.add("PLATFORM_DOMAIN", platformDomain);
         form.add("GITOPS_BRANCH", gitopsBranch);
-        form.add("ENABLE_GITOPS_UPDATE", String.valueOf(enableGitopsUpdate));
+        form.add("ENABLE_GITOPS_UPDATE", enableGitopsValue);
 
         ResponseEntity<String> response;
         try {
@@ -109,9 +120,14 @@ public class JenkinsServiceImpl implements JenkinsService {
             throw networkError;
         }
 
-        log.info("Triggered Jenkins deploy-pipeline for app '{}' user '{}' -> status={} queueLocation={}",
+        log.info("Triggered Jenkins deploy-pipeline for app '{}' user '{}' workspaceId='{}' branch='{}' customDomain='{}' gitopsBranch='{}' enableGitopsUpdate={} -> status={} queueLocation={}",
                 appName,
                 userId,
+                workspaceId,
+                branch,
+                normalizeCustomDomain(customDomain),
+                gitopsBranch,
+                enableGitopsValue,
                 response.getStatusCode().value(),
                 response.getHeaders().getFirst("Location"));
         String queueUrl = response.getHeaders().getFirst("Location");
@@ -214,6 +230,22 @@ public class JenkinsServiceImpl implements JenkinsService {
             }
         }
         return value;
+    }
+
+    private String normalizeCustomDomain(String customDomain) {
+        if (customDomain == null) {
+            return "";
+        }
+        String value = customDomain.trim().toLowerCase(Locale.ROOT);
+        if (value.isEmpty()) {
+            return "";
+        }
+        value = value.replaceFirst("^https?://", "");
+        int slash = value.indexOf('/');
+        if (slash >= 0) {
+            value = value.substring(0, slash);
+        }
+        return value.trim();
     }
 
     private Integer parseQueueItemId(String queueUrl) {

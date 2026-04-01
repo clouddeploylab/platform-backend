@@ -2,6 +2,7 @@ package com.ratana.monoloticappbackend.controller;
 
 import com.ratana.monoloticappbackend.dto.AutoDeployToggleRequest;
 import com.ratana.monoloticappbackend.dto.DeployProjectResponse;
+import com.ratana.monoloticappbackend.dto.ProjectDomainRequest;
 import com.ratana.monoloticappbackend.dto.ProjectRequest;
 import com.ratana.monoloticappbackend.dto.RepositoryConnectRequest;
 import com.ratana.monoloticappbackend.dto.WebhookCreateRequest;
@@ -46,6 +47,7 @@ public class ProjectController {
 
     private static final Pattern HTTPS_GITHUB = Pattern.compile("^https?://github\\.com/([^/]+)/([^/.]+)(?:\\.git)?/?$");
     private static final Pattern SSH_GITHUB = Pattern.compile("^git@github\\.com:([^/]+)/([^/.]+)(?:\\.git)?$");
+    private static final Pattern CUSTOM_DOMAIN_PATTERN = Pattern.compile("^(?=.{1,253}$)([a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?\\.)+[a-z]{2,63}$");
 
     @PostMapping
     public ResponseEntity<?> createProject(@Valid @RequestBody ProjectRequest req, Authentication auth) {
@@ -58,15 +60,25 @@ public class ProjectController {
         }
 
         int port = req.appPort() != null ? req.appPort() : 3000;
+        String workspaceKey = resolveWorkspaceKey(workspace);
 
         try {
             // 1. Trigger Jenkins CI build (this job writes deployment/service/ingress to GitOps)
-            JenkinsBuildTriggerResult trigger = jenkinsService.triggerBuild(req.repoUrl(), req.branch(), appName, port, userId);
+            JenkinsBuildTriggerResult trigger = jenkinsService.triggerBuild(
+                    req.repoUrl(),
+                    req.branch(),
+                    appName,
+                    port,
+                    userId,
+                    workspaceKey,
+                    null
+            );
 
             // 2. Persist project record
             Project project = new Project();
             project.setUserId(userId);
             project.setWorkspaceId(workspace.getId());
+            project.setWorkspaceSlug(workspace.getSlug());
             project.setAppName(appName);
             project.setRepoUrl(req.repoUrl());
             project.setBranch(req.branch());
@@ -75,7 +87,8 @@ public class ProjectController {
             project.setAutoDeployEnabled(false);
             project.setAppPort(port);
             project.setStatus("BUILDING");
-            project.setUrl("https://" + appName + "." + platformDomain);
+            project.setCustomDomain(null);
+            project.setUrl("https://" + resolveProjectHost(appName, workspaceKey, null));
             projectRepo.save(project);
 
             log.info("Project {} created and deployment pipeline triggered", appName);
@@ -176,6 +189,40 @@ public class ProjectController {
         return ResponseEntity.ok(Map.of(
                 "projectId", project.getId(),
                 "autoDeployEnabled", project.getAutoDeployEnabled()
+        ));
+    }
+
+    @PatchMapping("/{projectId}/domain")
+    public ResponseEntity<?> setProjectDomain(
+            @PathVariable String projectId,
+            @Valid @RequestBody ProjectDomainRequest req,
+            Authentication auth
+    ) {
+        String userId = extractUserFromRequest(auth);
+        Project project = projectRepo.findByUserIdAndId(userId, projectId)
+                .orElseThrow(() -> new IllegalArgumentException("Project not found"));
+
+        String normalizedDomain;
+        try {
+            normalizedDomain = normalizeCustomDomain(req.customDomain());
+        } catch (IllegalStateException invalidDomain) {
+            return ResponseEntity.badRequest().body(Map.of("error", invalidDomain.getMessage()));
+        }
+
+        String workspaceKey = resolveWorkspaceKey(project);
+        String defaultHost = resolveProjectHost(project.getAppName(), workspaceKey, null);
+        String effectiveHost = resolveProjectHost(project.getAppName(), workspaceKey, normalizedDomain);
+
+        project.setCustomDomain(normalizedDomain);
+        project.setUrl("https://" + effectiveHost);
+        projectRepo.save(project);
+
+        return ResponseEntity.ok(Map.of(
+                "projectId", project.getId(),
+                "workspace", workspaceKey,
+                "defaultHost", defaultHost,
+                "customDomain", project.getCustomDomain(),
+                "url", project.getUrl()
         ));
     }
 
@@ -348,7 +395,9 @@ public class ProjectController {
                     project.getBranch(),
                     project.getAppName(),
                     port,
-                    project.getUserId()
+                    project.getUserId(),
+                    resolveWorkspaceKey(project),
+                    project.getCustomDomain()
             );
             project.setStatus("BUILDING");
             projectRepo.save(project);
@@ -443,5 +492,78 @@ public class ProjectController {
             normalized = normalized.substring("refs/heads/".length());
         }
         return normalized.trim();
+    }
+
+    private String resolveWorkspaceKey(Workspace workspace) {
+        if (workspace == null) {
+            return "";
+        }
+        if (workspace.getSlug() != null && !workspace.getSlug().isBlank()) {
+            return workspace.getSlug().trim();
+        }
+        return workspace.getId() == null ? "" : workspace.getId().trim();
+    }
+
+    private String resolveWorkspaceKey(Project project) {
+        if (project.getWorkspaceSlug() != null && !project.getWorkspaceSlug().isBlank()) {
+            return project.getWorkspaceSlug().trim();
+        }
+        return project.getWorkspaceId() == null ? "" : project.getWorkspaceId().trim();
+    }
+
+    private String resolveProjectHost(String appName, String workspaceKey, String customDomain) {
+        String normalizedCustomDomain = customDomain == null ? null : customDomain.trim();
+        if (normalizedCustomDomain != null && !normalizedCustomDomain.isBlank()) {
+            return normalizedCustomDomain.toLowerCase(Locale.ROOT);
+        }
+        String hostLabel = slugifyHostLabel(appName + "-" + workspaceKey, 63);
+        return hostLabel + "." + platformDomain;
+    }
+
+    private String slugifyHostLabel(String raw, int maxLength) {
+        String normalized = raw == null ? "" : raw.toLowerCase(Locale.ROOT);
+        normalized = normalized.replaceAll("[^a-z0-9-]+", "-");
+        normalized = normalized.replaceAll("-{2,}", "-");
+        normalized = normalized.replaceAll("^-+|-+$", "");
+        if (normalized.isBlank()) {
+            normalized = "app";
+        }
+        if (normalized.length() > maxLength) {
+            normalized = normalized.substring(0, maxLength);
+            normalized = normalized.replaceAll("-+$", "");
+        }
+        if (normalized.isBlank()) {
+            return "app";
+        }
+        return normalized;
+    }
+
+    private String normalizeCustomDomain(String input) {
+        if (input == null) {
+            return null;
+        }
+        String value = input.trim().toLowerCase(Locale.ROOT);
+        if (value.isBlank()) {
+            return null;
+        }
+        value = value.replaceFirst("^https?://", "");
+        int slashIndex = value.indexOf('/');
+        if (slashIndex >= 0) {
+            value = value.substring(0, slashIndex);
+        }
+        value = value.trim();
+        if (value.isBlank()) {
+            return null;
+        }
+        if (value.startsWith("*.")) {
+            throw new IllegalStateException("Wildcard domain is not supported. Use a concrete host.");
+        }
+        if (value.contains(":")) {
+            throw new IllegalStateException("Custom domain must not include a port.");
+        }
+        if (!CUSTOM_DOMAIN_PATTERN.matcher(value).matches()) {
+            throw new IllegalStateException("Invalid custom domain format.");
+        }
+        return value;
     }
 }
