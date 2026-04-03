@@ -4,8 +4,10 @@ import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.ratana.monoloticappbackend.dto.JenkinsBuildTriggerResult;
 import com.ratana.monoloticappbackend.model.Project;
+import com.ratana.monoloticappbackend.model.ProjectRelease;
 import com.ratana.monoloticappbackend.repository.ProjectRepository;
 import com.ratana.monoloticappbackend.service.JenkinsService;
+import com.ratana.monoloticappbackend.service.ProjectReleaseService;
 import com.ratana.monoloticappbackend.service.WebhookService;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
@@ -30,6 +32,7 @@ public class WebhookController {
 
     private final ProjectRepository projectRepo;
     private final JenkinsService jenkinsService;
+    private final ProjectReleaseService projectReleaseService;
     private final WebhookService webhookService;
     private final ObjectMapper objectMapper;
 
@@ -135,6 +138,18 @@ public class WebhookController {
             }
 
             int appPort = project.getAppPort() != null ? project.getAppPort() : 3000;
+            String imageTag = buildReleaseImageTag(project.getAppName());
+            ProjectRelease release = projectReleaseService.createReleaseSnapshot(
+                    project,
+                    "SYNC",
+                    buildReleaseImageRepository(project),
+                    imageTag,
+                    appPort,
+                    project.getFramework(),
+                    project.getCustomDomain(),
+                    null,
+                    null
+            );
             JenkinsBuildTriggerResult trigger;
             try {
                 trigger = jenkinsService.triggerBuild(
@@ -146,10 +161,18 @@ public class WebhookController {
                         project.getWorkspaceSlug() != null && !project.getWorkspaceSlug().isBlank()
                                 ? project.getWorkspaceSlug()
                                 : project.getWorkspaceId(),
-                        project.getCustomDomain()
+                        project.getCustomDomain(),
+                        project.getFramework(),
+                        imageTag,
+                        false
                 );
             } catch (Exception ex) {
                 log.error("Jenkins trigger failed for projectId={} repo={} branch={}", project.getId(), repoFullName, branch, ex);
+                try {
+                    projectReleaseService.markFailed(project.getId(), release.getId(), null, project.getFramework(), "Jenkins trigger failed");
+                } catch (Exception ignored) {
+                    // best effort
+                }
                 return ResponseEntity.status(HttpStatus.BAD_GATEWAY).body(Map.of(
                         "error", "Jenkins trigger failed",
                         "projectId", project.getId()
@@ -164,6 +187,7 @@ public class WebhookController {
             return ResponseEntity.accepted().body(Map.of(
                     "status", "accepted",
                     "projectId", project.getId(),
+                    "release", release,
                     "queueUrl", trigger.queueUrl(),
                     "queueItemId", trigger.queueItemId()
             ));
@@ -171,6 +195,19 @@ public class WebhookController {
             log.error("Failed to handle GitHub webhook", e);
             return ResponseEntity.status(HttpStatus.BAD_GATEWAY).body(Map.of("error", "Webhook processing failed"));
         }
+    }
+
+    private String buildReleaseImageTag(String appName) {
+        String base = appName == null ? "app" : appName.toLowerCase().replaceAll("[^a-z0-9-]+", "-");
+        String suffix = java.util.UUID.randomUUID().toString().substring(0, 8);
+        String tag = base + "-" + suffix;
+        return tag.replaceAll("-{2,}", "-").replaceAll("^-+|-+$", "");
+    }
+
+    private String buildReleaseImageRepository(Project project) {
+        String userPart = project.getUserId() == null ? "user" : project.getUserId().toLowerCase().replaceAll("[^a-z0-9-]+", "-");
+        String projectPart = project.getAppName() == null ? "project" : project.getAppName().toLowerCase().replaceAll("[^a-z0-9-]+", "-");
+        return userPart + "/" + projectPart;
     }
 
     private String extractPayloadJson(String rawPayload, String contentType) {

@@ -13,7 +13,22 @@ public interface JenkinsService {
             int appPort,
             String userId,
             String workspaceId,
-            String customDomain
+            String customDomain,
+            String framework,
+            String imageTag,
+            boolean rollbackMode
+    );
+
+    JenkinsBuildTriggerResult triggerRollback(
+            String repoUrl,
+            String branch,
+            String appName,
+            int appPort,
+            String userId,
+            String workspaceId,
+            String customDomain,
+            String framework,
+            String imageTag
     );
 
     SseEmitter streamBuildLogs(String jobName, int buildNumber);

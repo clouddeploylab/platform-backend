@@ -87,7 +87,10 @@ public class JenkinsServiceImpl implements JenkinsService {
             int appPort,
             String userId,
             String workspaceId,
-            String customDomain
+            String customDomain,
+            String framework,
+            String imageTag,
+            boolean rollbackMode
     ) {
         String url = String.format("%s/%s/buildWithParameters", trimTrailingSlash(jenkinsUrl), buildPath(defaultJobName));
 
@@ -108,6 +111,13 @@ public class JenkinsServiceImpl implements JenkinsService {
         form.add("PLATFORM_DOMAIN", platformDomain);
         form.add("GITOPS_BRANCH", gitopsBranch);
         form.add("ENABLE_GITOPS_UPDATE", enableGitopsValue);
+        if (framework != null && !framework.isBlank()) {
+            form.add("FRAMEWORK", framework.trim());
+        }
+        if (imageTag != null && !imageTag.isBlank()) {
+            form.add("IMAGE_TAG", imageTag.trim());
+        }
+        form.add("ROLLBACK_MODE", String.valueOf(rollbackMode));
 
         ResponseEntity<String> response;
         try {
@@ -133,6 +143,21 @@ public class JenkinsServiceImpl implements JenkinsService {
         String queueUrl = response.getHeaders().getFirst("Location");
         Integer queueItemId = parseQueueItemId(queueUrl);
         return new JenkinsBuildTriggerResult(defaultJobName, queueUrl, queueItemId);
+    }
+
+    @Override
+    public JenkinsBuildTriggerResult triggerRollback(
+            String repoUrl,
+            String branch,
+            String appName,
+            int appPort,
+            String userId,
+            String workspaceId,
+            String customDomain,
+            String framework,
+            String imageTag
+    ) {
+        return triggerBuild(repoUrl, branch, appName, appPort, userId, workspaceId, customDomain, framework, imageTag, true);
     }
 
     @Override

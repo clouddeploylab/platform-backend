@@ -26,11 +26,6 @@ public class WorkspaceServiceImpl implements WorkspaceService {
                 });
     }
 
-    @Override
-    public Workspace getPersonalWorkspace(String userId) {
-        return ensurePersonalWorkspace(userId, null);
-    }
-
     private String resolveWorkspaceName(String preferredName) {
         if (preferredName == null || preferredName.isBlank()) {
             return "My Workspace";

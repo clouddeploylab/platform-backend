@@ -3,14 +3,18 @@ package com.ratana.monoloticappbackend.controller;
 import com.ratana.monoloticappbackend.dto.AutoDeployToggleRequest;
 import com.ratana.monoloticappbackend.dto.DeployProjectResponse;
 import com.ratana.monoloticappbackend.dto.ProjectDomainRequest;
+import com.ratana.monoloticappbackend.dto.ProjectRollbackRequest;
+import com.ratana.monoloticappbackend.dto.ProjectReleaseRequest;
 import com.ratana.monoloticappbackend.dto.ProjectRequest;
 import com.ratana.monoloticappbackend.dto.RepositoryConnectRequest;
 import com.ratana.monoloticappbackend.dto.WebhookCreateRequest;
 import com.ratana.monoloticappbackend.model.Project;
+import com.ratana.monoloticappbackend.model.ProjectRelease;
 import com.ratana.monoloticappbackend.model.Workspace;
 import com.ratana.monoloticappbackend.repository.ProjectRepository;
 import com.ratana.monoloticappbackend.dto.JenkinsBuildTriggerResult;
 import com.ratana.monoloticappbackend.service.JenkinsService;
+import com.ratana.monoloticappbackend.service.ProjectReleaseService;
 import com.ratana.monoloticappbackend.service.WebhookProvisionResult;
 import com.ratana.monoloticappbackend.service.WebhookService;
 import com.ratana.monoloticappbackend.service.WorkspaceService;
@@ -38,6 +42,7 @@ import java.util.regex.Pattern;
 public class ProjectController {
 
     private final JenkinsService jenkinsService;
+    private final ProjectReleaseService projectReleaseService;
     private final ProjectRepository projectRepo;
     private final WebhookService webhookService;
     private final WorkspaceService workspaceService;
@@ -61,21 +66,11 @@ public class ProjectController {
 
         int port = req.appPort() != null ? req.appPort() : 3000;
         String workspaceKey = resolveWorkspaceKey(workspace);
+        Project project = null;
+        ProjectRelease release = null;
 
         try {
-            // 1. Trigger Jenkins CI build (this job writes deployment/service/ingress to GitOps)
-            JenkinsBuildTriggerResult trigger = jenkinsService.triggerBuild(
-                    req.repoUrl(),
-                    req.branch(),
-                    appName,
-                    port,
-                    userId,
-                    workspaceKey,
-                    null
-            );
-
-            // 2. Persist project record
-            Project project = new Project();
+            project = new Project();
             project.setUserId(userId);
             project.setWorkspaceId(workspace.getId());
             project.setWorkspaceSlug(workspace.getSlug());
@@ -91,16 +86,55 @@ public class ProjectController {
             project.setUrl("https://" + resolveProjectHost(appName, workspaceKey, null));
             projectRepo.save(project);
 
+            String imageTag = generateReleaseImageTag(appName);
+            release = projectReleaseService.createReleaseSnapshot(
+                    project,
+                    "DEPLOY",
+                    resolveReleaseImageRepository(userId, appName),
+                    imageTag,
+                    port,
+                    null,
+                    null,
+                    null,
+                    null
+            );
+
+            // 1. Trigger Jenkins CI build (this job writes deployment/service/ingress to GitOps)
+            JenkinsBuildTriggerResult trigger = jenkinsService.triggerBuild(
+                    req.repoUrl(),
+                    req.branch(),
+                    appName,
+                    port,
+                    userId,
+                    workspaceKey,
+                    null,
+                    null,
+                    imageTag,
+                    false
+            );
+
             log.info("Project {} created and deployment pipeline triggered", appName);
 
             return ResponseEntity.ok(new DeployProjectResponse(
                     project,
+                    release,
                     trigger.jobName(),
                     trigger.queueUrl(),
                     trigger.queueItemId()
             ));
         } catch (Exception e) {
             log.error("Failed to create project deployment flow for app: " + appName, e);
+            try {
+                if (project != null) {
+                    project.setStatus("FAILED");
+                    projectRepo.save(project);
+                }
+                if (release != null) {
+                    projectReleaseService.markFailed(project.getId(), release.getId(), null, null, "Deployment failed to start");
+                }
+            } catch (Exception ignored) {
+                // Best effort cleanup.
+            }
             return ResponseEntity.internalServerError().body(Map.of("error", "Deployment failed to start"));
         }
     }
@@ -388,8 +422,22 @@ public class ProjectController {
                 .orElseThrow(() -> new IllegalArgumentException("Project not found"));
 
         int port = project.getAppPort() != null ? project.getAppPort() : 3000;
+        ProjectRelease release = null;
 
         try {
+            String imageTag = generateReleaseImageTag(project.getAppName());
+            release = projectReleaseService.createReleaseSnapshot(
+                    project,
+                    "SYNC",
+                    resolveReleaseImageRepository(project.getUserId(), project.getAppName()),
+                    imageTag,
+                    port,
+                    project.getFramework(),
+                    project.getCustomDomain(),
+                    null,
+                    null
+            );
+
             JenkinsBuildTriggerResult trigger = jenkinsService.triggerBuild(
                     project.getRepoUrl(),
                     project.getBranch(),
@@ -397,20 +445,179 @@ public class ProjectController {
                     port,
                     project.getUserId(),
                     resolveWorkspaceKey(project),
-                    project.getCustomDomain()
+                    project.getCustomDomain(),
+                    project.getFramework(),
+                    imageTag,
+                    false
             );
             project.setStatus("BUILDING");
             projectRepo.save(project);
 
             return ResponseEntity.accepted().body(Map.of(
                     "status", "accepted",
+                    "release", release,
                     "jobName", trigger.jobName(),
                     "queueUrl", trigger.queueUrl(),
                     "queueItemId", trigger.queueItemId()
             ));
         } catch (Exception e) {
             log.error("Manual sync failed for project {}", project.getId(), e);
+            try {
+                if (release != null) {
+                    projectReleaseService.markFailed(
+                            project.getId(),
+                            release.getId(),
+                            null,
+                            project.getFramework(),
+                            "Failed to trigger Jenkins pipeline"
+                    );
+                }
+                project.setStatus("FAILED");
+                projectRepo.save(project);
+            } catch (Exception ignored) {
+                // best effort cleanup
+            }
             return ResponseEntity.status(HttpStatus.BAD_GATEWAY).body(Map.of("error", "Failed to trigger Jenkins pipeline"));
+        }
+    }
+
+    @GetMapping("/{projectId}/releases")
+    public ResponseEntity<?> listReleases(@PathVariable String projectId, Authentication auth) {
+        String userId = extractUserFromRequest(auth);
+        projectRepo.findByUserIdAndId(userId, projectId)
+                .orElseThrow(() -> new IllegalArgumentException("Project not found"));
+        return ResponseEntity.ok(projectReleaseService.listRecentReleases(projectId, 3));
+    }
+
+    @PostMapping("/{projectId}/releases/{releaseId}/complete")
+    public ResponseEntity<?> completeRelease(
+            @PathVariable String projectId,
+            @PathVariable String releaseId,
+            @Valid @RequestBody(required = false) ProjectReleaseRequest req,
+            Authentication auth
+    ) {
+        String userId = extractUserFromRequest(auth);
+        Project project = projectRepo.findByUserIdAndId(userId, projectId)
+                .orElseThrow(() -> new IllegalArgumentException("Project not found"));
+
+        ProjectRelease release = projectReleaseService.markCompleted(
+                projectId,
+                releaseId,
+                req == null ? null : req.buildNumber(),
+                req == null ? null : req.framework()
+        );
+
+        project.setStatus("DEPLOYED");
+        if (req != null && req.framework() != null && !req.framework().isBlank()) {
+            project.setFramework(req.framework().trim());
+        } else if (release.getFramework() != null && !release.getFramework().isBlank()) {
+            project.setFramework(release.getFramework().trim());
+        }
+        if (release.getAppPort() != null) {
+            project.setAppPort(release.getAppPort());
+        }
+        if (release.getUrl() != null && !release.getUrl().isBlank()) {
+            project.setUrl(release.getUrl());
+        }
+        projectRepo.save(project);
+        return ResponseEntity.ok(release);
+    }
+
+    @PostMapping("/{projectId}/releases/{releaseId}/failed")
+    public ResponseEntity<?> failRelease(
+            @PathVariable String projectId,
+            @PathVariable String releaseId,
+            @Valid @RequestBody(required = false) ProjectReleaseRequest req,
+            Authentication auth
+    ) {
+        String userId = extractUserFromRequest(auth);
+        Project project = projectRepo.findByUserIdAndId(userId, projectId)
+                .orElseThrow(() -> new IllegalArgumentException("Project not found"));
+
+        ProjectRelease release = projectReleaseService.markFailed(
+                projectId,
+                releaseId,
+                req == null ? null : req.buildNumber(),
+                req == null ? null : req.framework(),
+                req == null ? null : req.statusMessage()
+        );
+
+        project.setStatus("FAILED");
+        if (req != null && req.framework() != null && !req.framework().isBlank()) {
+            project.setFramework(req.framework().trim());
+        }
+        projectRepo.save(project);
+        return ResponseEntity.ok(release);
+    }
+
+    @PostMapping("/{projectId}/rollback")
+    public ResponseEntity<?> rollbackProject(
+            @PathVariable String projectId,
+            @Valid @RequestBody ProjectRollbackRequest req,
+            Authentication auth
+    ) {
+        String userId = extractUserFromRequest(auth);
+        Project project = projectRepo.findByUserIdAndId(userId, projectId)
+                .orElseThrow(() -> new IllegalArgumentException("Project not found"));
+
+        ProjectRelease sourceRelease = projectReleaseService.getRelease(projectId, req.releaseId());
+        if (sourceRelease.getVersionTag() == null || sourceRelease.getVersionTag().isBlank()) {
+            return ResponseEntity.badRequest().body(Map.of("error", "Selected release does not have a version tag"));
+        }
+        if (sourceRelease.getFramework() == null || sourceRelease.getFramework().isBlank()) {
+            return ResponseEntity.badRequest().body(Map.of("error", "Selected release does not have a saved framework yet"));
+        }
+
+        ProjectRelease rollbackRelease = null;
+        try {
+            rollbackRelease = projectReleaseService.createRollbackSnapshot(
+                    project,
+                    sourceRelease,
+                    sourceRelease.getVersionTag()
+            );
+
+            JenkinsBuildTriggerResult trigger = jenkinsService.triggerRollback(
+                    project.getRepoUrl(),
+                    project.getBranch(),
+                    project.getAppName(),
+                    sourceRelease.getAppPort() == null ? (project.getAppPort() == null ? 3000 : project.getAppPort()) : sourceRelease.getAppPort(),
+                    project.getUserId(),
+                    resolveWorkspaceKey(project),
+                    project.getCustomDomain() != null && !project.getCustomDomain().isBlank()
+                            ? project.getCustomDomain()
+                            : sourceRelease.getCustomDomain(),
+                    sourceRelease.getFramework(),
+                    sourceRelease.getVersionTag()
+            );
+
+            project.setStatus("BUILDING");
+            projectRepo.save(project);
+
+            return ResponseEntity.accepted().body(Map.of(
+                    "status", "accepted",
+                    "release", rollbackRelease,
+                    "jobName", trigger.jobName(),
+                    "queueUrl", trigger.queueUrl(),
+                    "queueItemId", trigger.queueItemId()
+            ));
+        } catch (Exception e) {
+            log.error("Rollback failed for project {} release {}", projectId, req.releaseId(), e);
+            try {
+                if (rollbackRelease != null) {
+                    projectReleaseService.markFailed(
+                            project.getId(),
+                            rollbackRelease.getId(),
+                            null,
+                            sourceRelease.getFramework(),
+                            "Failed to trigger rollback pipeline"
+                    );
+                }
+                project.setStatus("FAILED");
+                projectRepo.save(project);
+            } catch (Exception ignored) {
+                // best effort cleanup
+            }
+            return ResponseEntity.status(HttpStatus.BAD_GATEWAY).body(Map.of("error", "Failed to trigger rollback"));
         }
     }
 
@@ -518,6 +725,16 @@ public class ProjectController {
         }
         String hostLabel = slugifyHostLabel(appName + "-" + workspaceKey, 63);
         return hostLabel + "." + platformDomain;
+    }
+
+    private String generateReleaseImageTag(String appName) {
+        String base = slugifyHostLabel(appName, 40);
+        String suffix = java.util.UUID.randomUUID().toString().substring(0, 8);
+        return slugifyHostLabel(base + "-" + suffix, 63);
+    }
+
+    private String resolveReleaseImageRepository(String userId, String projectName) {
+        return slugifyHostLabel(userId, 30) + "/" + slugifyHostLabel(projectName, 40);
     }
 
     private String slugifyHostLabel(String raw, int maxLength) {
